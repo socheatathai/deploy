@@ -1,25 +1,22 @@
 import { Injectable } from '@nestjs/common';
-import { VercelKV, createClient } from '@vercel/kv';
+import Redis from 'ioredis';
 
 @Injectable()
 export class UsersMemoryStorage {
   private static readonly FOUR_HOURS_IN_MILLISECONDS = 4 * 60 * 60 * 1000;
-  private redisClient: VercelKV;
+  private redisClient: Redis;
 
   constructor() {
-    const apiUrl = process.env.KV_REST_API_URL;
-    const apiToken = process.env.KV_REST_API_TOKEN;
+    const redisUrl = process.env.REDIS_URL;
 
-    if (!apiUrl || !apiToken) {
-      throw new Error(
-        'Environment variables for Vercel KV are not set properly.',
-      );
+    if (!redisUrl) {
+      throw new Error('Environment variable REDIS_URL is not set properly.');
     }
 
     try {
-      this.redisClient = createClient({ url: apiUrl, token: apiToken });
+      this.redisClient = new Redis(redisUrl); // Initialize Redis Cloud client
     } catch (error) {
-      console.error('Error initializing Vercel KV client:', error);
+      console.error('Error initializing Redis client:', error);
       throw error;
     }
   }
@@ -31,25 +28,30 @@ export class UsersMemoryStorage {
    * @returns The number of remaining seconds. Returns 0 if the user can already play again.
    */
   async timeUntilNextPlay(userIp: string): Promise<number> {
-    const storedEventDateStr: string = await this.redisClient.get(
-      this.constructKeyFromIP(userIp),
-    );
-    if (!storedEventDateStr) {
-      // If no date is stored, the user can play immediately.
-      return 0;
-    }
+    try {
+      const storedEventDateStr: string | null = await this.redisClient.get(
+        this.constructKeyFromIP(userIp),
+      );
 
-    const storedEventDate = new Date(storedEventDateStr);
-    const currentTime = new Date();
-    const timeDifference = currentTime.getTime() - storedEventDate.getTime();
+      if (!storedEventDateStr) {
+        return 0;
+      }
 
-    if (timeDifference >= UsersMemoryStorage.FOUR_HOURS_IN_MILLISECONDS) {
-      return 0;
-    } else {
-      // Calculate the remaining time in seconds.
-      const remainingTime =
-        UsersMemoryStorage.FOUR_HOURS_IN_MILLISECONDS - timeDifference;
-      return Math.ceil(remainingTime / 1000); // Convert to seconds and round up.
+      const storedEventDate = new Date(storedEventDateStr);
+      const currentTime = new Date();
+      const timeDifference = currentTime.getTime() - storedEventDate.getTime();
+
+      if (timeDifference >= UsersMemoryStorage.FOUR_HOURS_IN_MILLISECONDS) {
+        return 0;
+      } else {
+        return Math.ceil(
+          (UsersMemoryStorage.FOUR_HOURS_IN_MILLISECONDS - timeDifference) /
+            1000,
+        );
+      }
+    } catch (error) {
+      console.error('Error fetching data from Redis:', error);
+      return 0; // If there's an error, allow the user to play
     }
   }
 
@@ -93,6 +95,15 @@ export class UsersMemoryStorage {
    * @param date - The date of the event to store.
    */
   private async storeEventDate(key: string, date: Date): Promise<void> {
-    await this.redisClient.set(key, date.toISOString());
+    try {
+      await this.redisClient.set(
+        key,
+        date.toISOString(),
+        'PX',
+        UsersMemoryStorage.FOUR_HOURS_IN_MILLISECONDS,
+      );
+    } catch (error) {
+      console.error('Error storing data in Redis:', error);
+    }
   }
 }
